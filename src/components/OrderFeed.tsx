@@ -1,15 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useOrderStore } from '@/store/useOrderStore';
-import type { Order, OrderType } from '@/types';
+import type { Order, OrderType, OrderBundle } from '@/types';
 import { formatDateTime, formatPrice } from '@/lib/utils';
-import { User, Package, MapPin, Calendar, Phone, MessageCircle, Loader2 } from 'lucide-react';
+import { User, Package, MapPin, Calendar, Phone, MessageCircle, Loader2, Zap } from 'lucide-react';
 import { useAuthStore } from '@/store/useAuthStore';
+import { groupOrders } from '@/lib/orderGrouping';
 
 const cities = [
   'Алматы',
@@ -52,6 +53,22 @@ export function OrderFeed() {
     }
   };
 
+  const handleTakeBatch = async (bundle: OrderBundle) => {
+    if (!profile || profile.role !== 'driver') {
+      alert('Только водители могут принимать заявки');
+      return;
+    }
+
+    const orderCount = bundle.orders.length;
+    if (confirm(`Вы уверены, что хотите принять весь пакет из ${orderCount} заявок?`)) {
+      // Принимаем все заказы в Bundle одновременно
+      await Promise.all(
+        bundle.orders.map((order) => updateOrder(order.id, { status: 'matched' }))
+      );
+      alert(`Пакет из ${orderCount} заявок принят! Свяжитесь с пассажирами для уточнения деталей.`);
+    }
+  };
+
   const handleContact = (phone: string | null) => {
     if (!phone) {
       alert('Номер телефона не указан');
@@ -67,6 +84,14 @@ export function OrderFeed() {
     if (filters.to_city && order.to_city !== filters.to_city) return false;
     return true;
   });
+
+  // Группируем заказы для водителей (Smart Stacking)
+  const { bundles, standaloneOrders } = useMemo(() => {
+    if (profile?.role !== 'driver') {
+      return { bundles: [], standaloneOrders: filteredOrders };
+    }
+    return groupOrders(filteredOrders);
+  }, [filteredOrders, profile?.role]);
 
   return (
     <div className="space-y-4">
@@ -120,7 +145,7 @@ export function OrderFeed() {
         <div className="flex items-center justify-center py-8">
           <Loader2 className="h-8 w-8 animate-spin" />
         </div>
-      ) : filteredOrders.length === 0 ? (
+      ) : (profile?.role === 'driver' ? bundles.length + standaloneOrders.length : filteredOrders.length) === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
             Нет доступных заявок
@@ -128,7 +153,85 @@ export function OrderFeed() {
         </Card>
       ) : (
         <div className="space-y-3">
-          {filteredOrders.map((order) => (
+          {/* Bundle Cards для водителей */}
+          {profile?.role === 'driver' && bundles.map((bundle) => (
+            <Card key={bundle.id} className="border-2 border-amber-500/50 bg-gradient-to-br from-amber-50/50 to-orange-50/50 dark:from-amber-950/20 dark:to-orange-950/20">
+              <CardHeader>
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-2">
+                    <Zap className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+                    <CardTitle className="text-lg flex items-center gap-2">
+                      <span className="text-amber-600 dark:text-amber-400">🔥</span>
+                      {bundle.to_city} Bundle
+                    </CardTitle>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-lg font-bold text-primary">
+                      {formatPrice(bundle.totalPrice)}
+                    </span>
+                    <div className="text-xs text-muted-foreground">
+                      {bundle.orders.length} заявок
+                    </div>
+                  </div>
+                </div>
+                <CardDescription className="flex items-center gap-4 pt-2">
+                  <span className="flex items-center gap-1">
+                    <User className="h-4 w-4" />
+                    {bundle.passengerCount} Пассажир{bundle.passengerCount !== 1 ? 'ов' : ''}
+                  </span>
+                  {bundle.parcelCount > 0 && (
+                    <span className="flex items-center gap-1">
+                      <Package className="h-4 w-4" />
+                      {bundle.parcelCount} Посылк{bundle.parcelCount !== 1 ? 'и' : 'а'}
+                    </span>
+                  )}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="space-y-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <MapPin className="h-4 w-4 text-muted-foreground" />
+                    <span>
+                      <strong>→ {bundle.to_city}</strong>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Calendar className="h-4 w-4 text-muted-foreground" />
+                    <span>{formatDateTime(bundle.scheduled_at)}</span>
+                    <span className="text-muted-foreground text-xs">
+                      (окно ±1 час)
+                    </span>
+                  </div>
+                  <div className="text-xs text-muted-foreground pt-1 border-t">
+                    <strong>Детали пакета:</strong>
+                    <ul className="list-disc list-inside mt-1 space-y-0.5">
+                      {bundle.orders.map((order, idx) => (
+                        <li key={order.id}>
+                          {order.from_city} → {order.to_city} • {formatPrice(order.price)}
+                          {order.user?.full_name && ` • ${order.user.full_name}`}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+
+                {profile?.role === 'driver' && (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="default"
+                      className="flex-1 bg-amber-600 hover:bg-amber-700 text-white font-semibold"
+                      onClick={() => handleTakeBatch(bundle)}
+                    >
+                      Принять весь пакет
+                    </Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          ))}
+
+          {/* Отдельные заказы */}
+          {(profile?.role === 'driver' ? standaloneOrders : filteredOrders).map((order) => (
             <Card key={order.id}>
               <CardHeader>
                 <div className="flex items-start justify-between">
